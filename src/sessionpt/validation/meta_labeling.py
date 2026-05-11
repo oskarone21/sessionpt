@@ -1,0 +1,73 @@
+"""Leakage checks for conservative meta-labeling experiments."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+import pandas as pd
+
+FORBIDDEN_FEATURE_TOKENS = ("future", "forward", "exit", "target", "label", "pnl")
+DEFAULT_TARGET_VALUES = frozenset({0, 1})
+ROWS_KEY = "rows"
+FEATURES_KEY = "features"
+FOLDS_KEY = "folds"
+POSITIVE_LABELS_KEY = "positive_labels"
+
+
+@dataclass(frozen=True)
+class MetaLabelSpec:
+    feature_cols: tuple[str, ...]
+    target_col: str
+    timestamp_col: str
+    fold_col: str
+
+
+def validate_meta_label_dataset(
+    frame: pd.DataFrame,
+    spec: MetaLabelSpec,
+    allowed_target_values: frozenset[int] = DEFAULT_TARGET_VALUES,
+) -> dict[str, int]:
+    missing = [
+        column
+        for column in (*spec.feature_cols, spec.target_col, spec.timestamp_col, spec.fold_col)
+        if column not in frame.columns
+    ]
+    if missing:
+        raise ValueError(f"Missing meta-label columns: {missing}")
+
+    leaking = [
+        column
+        for column in spec.feature_cols
+        if any(token in column.lower() for token in FORBIDDEN_FEATURE_TOKENS)
+    ]
+    if leaking:
+        raise ValueError(f"Feature columns look leakage-prone: {leaking}")
+
+    target_values = set(frame[spec.target_col].dropna().astype(int).unique())
+    if not target_values.issubset(allowed_target_values):
+        raise ValueError(f"Unexpected target values: {sorted(target_values)}")
+
+    if frame[spec.timestamp_col].isna().any():
+        raise ValueError(f"Timestamp column contains nulls: {spec.timestamp_col}")
+
+    return {
+        ROWS_KEY: len(frame),
+        FEATURES_KEY: len(spec.feature_cols),
+        FOLDS_KEY: int(frame[spec.fold_col].nunique()),
+        POSITIVE_LABELS_KEY: int((frame[spec.target_col] == 1).sum()),
+    }
+
+
+def build_meta_label_spec(
+    feature_cols: Sequence[str],
+    target_col: str = "target_reaches_tp_before_sl",
+    timestamp_col: str = "entry_time",
+    fold_col: str = "fold_id",
+) -> MetaLabelSpec:
+    return MetaLabelSpec(
+        feature_cols=tuple(feature_cols),
+        target_col=target_col,
+        timestamp_col=timestamp_col,
+        fold_col=fold_col,
+    )
