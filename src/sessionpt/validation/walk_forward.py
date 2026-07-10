@@ -6,7 +6,7 @@ it does not depend on any specific strategy or backtesting engine.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from dateutil.relativedelta import relativedelta
@@ -23,12 +23,11 @@ class WalkForwardFold:
     train_start : datetime
         Start of the training window (inclusive).
     train_end : datetime
-        End of the training window (inclusive-ish; test_start is typically
-        the next period).
+        End of the training window (inclusive).
     test_start : datetime
         Start of the out-of-sample window (inclusive).
     test_end : datetime
-        End of the out-of-sample window (inclusive).
+        End of the out-of-sample window (inclusive and disjoint from training).
     """
 
     fold_id: int
@@ -40,12 +39,12 @@ class WalkForwardFold:
     @property
     def train_duration_days(self) -> int:
         """Training window duration in calendar days."""
-        return (self.train_end - self.train_start).days
+        return (self.train_end.date() - self.train_start.date()).days + 1
 
     @property
     def test_duration_days(self) -> int:
         """Test window duration in calendar days."""
-        return (self.test_end - self.test_start).days
+        return (self.test_end.date() - self.test_start.date()).days + 1
 
 
 @dataclass
@@ -75,7 +74,7 @@ class OptResult:
     profit_factor : float
         Gross wins / gross losses (inf if no losses).
     sharpe_ratio : float
-        Annualized Sharpe ratio of trade P&Ls.
+        Per-trade Sharpe ratio of trade P&Ls.
     sortino_ratio : float
         Annualized Sortino ratio (downside deviation only).
     max_drawdown : float
@@ -228,18 +227,27 @@ def generate_walk_forward_folds(
     ...     step_months=2,
     ... )
     >>> len(folds)
-    7
+    15
     >>> folds[0].fold_id
     1
     """
+    values = (train_months, test_months, step_months)
+    if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in values):
+        raise ValueError("train_months, test_months, and step_months must be positive integers")
+    if step_months < test_months:
+        raise ValueError("step_months must be at least test_months for non-overlapping OOS folds")
+    if data_start >= data_end:
+        raise ValueError("data_start must be before data_end")
+
     folds: list[WalkForwardFold] = []
     fold_id = 1
     train_start = data_start
 
     while True:
-        train_end = train_start + relativedelta(months=train_months)
-        test_start = train_end
-        test_end = test_start + relativedelta(months=test_months)
+        test_start = train_start + relativedelta(months=train_months)
+        train_end = test_start - timedelta(microseconds=1)
+        next_fold_boundary = test_start + relativedelta(months=test_months)
+        test_end = next_fold_boundary - timedelta(microseconds=1)
 
         if test_end > data_end:
             break

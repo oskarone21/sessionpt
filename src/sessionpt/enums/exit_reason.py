@@ -13,6 +13,7 @@ class ExitReason(Enum):
         BREAKEVEN: Breakeven stop was hit after breakeven activation.
         EOD: Position was closed at end of day.
         MAX_HOLD: Maximum holding period was reached.
+        DATA_END: Available data ended before another exit condition.
     """
 
     SL = "SL"
@@ -21,3 +22,4 @@ class ExitReason(Enum):
     BREAKEVEN = "BREAKEVEN"
     EOD = "EOD"
     MAX_HOLD = "MAX_HOLD"
+    DATA_END = "DATA_END"

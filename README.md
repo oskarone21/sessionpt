@@ -54,7 +54,7 @@ exec_policy = spt.ExecutionPolicy(close_at_eod=True, max_trades_per_session=5)
 
 # 5. Run event-driven backtest
 result = spt.run_event_backtest(df, entry_events, gc, exec_policy)
-print(f"Trades: {result.trades}, PnL: ${result.total_pnl_net:,.0f}, Sharpe: {result.sharpe_ratio:.2f}")
+print(f"Trades: {result.trades}, PnL: ${result.total_pnl_net:,.0f}, per-trade Sharpe: {result.sharpe_ratio:.2f}")
 ```
 
 ## Features

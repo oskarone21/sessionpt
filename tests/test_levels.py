@@ -60,3 +60,23 @@ def test_initial_balance_window_is_local_time_dst_safe():
 
     counts = out.groupby("ib_session_label")["ib_in_window"].sum().astype(int).tolist()
     assert counts == [60, 60]
+
+
+def test_initial_balance_accepts_complete_five_minute_window():
+    index = pd.date_range("2024-01-02 14:30:00+00:00", periods=13, freq="5min")
+    out = add_initial_balance_levels(
+        _make_intraday(index), timezone="America/New_York", ib_window_minutes=60
+    )
+
+    assert bool(out["ib_complete"].iloc[-1]) is True
+    assert out["ib_window_bar_count"].iloc[-1] == 12
+
+
+def test_initial_balance_rejects_partial_thirty_second_window():
+    partial = pd.date_range("2024-01-02 14:30:00+00:00", periods=60, freq="30s")
+    index = partial.append(pd.DatetimeIndex([pd.Timestamp("2024-01-02 15:30:00+00:00")]))
+    out = add_initial_balance_levels(
+        _make_intraday(index), timezone="America/New_York", ib_window_minutes=60
+    )
+
+    assert not out["ib_complete"].any()

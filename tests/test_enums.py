@@ -68,7 +68,7 @@ class TestPivotLevel:
 
 class TestExitReason:
     def test_all_reasons(self):
-        assert len(ExitReason) == 6
+        assert len(ExitReason) == 7
 
     def test_sl(self):
         assert ExitReason.SL.value == "SL"
@@ -78,3 +78,6 @@ class TestExitReason:
 
     def test_eod(self):
         assert ExitReason.EOD.value == "EOD"
+
+    def test_data_end(self):
+        assert ExitReason.DATA_END.value == "DATA_END"

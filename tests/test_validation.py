@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+import pytest
+
 from sessionpt.validation.walk_forward import (
     FoldResult,
     OptResult,
@@ -15,9 +17,9 @@ class TestWalkForwardFold:
         fold = WalkForwardFold(
             fold_id=1,
             train_start=datetime(2020, 1, 1),
-            train_end=datetime(2020, 7, 1),
+            train_end=datetime(2020, 6, 30, 23, 59, 59, 999999),
             test_start=datetime(2020, 7, 1),
-            test_end=datetime(2020, 9, 1),
+            test_end=datetime(2020, 8, 31, 23, 59, 59, 999999),
         )
         assert fold.train_duration_days == 182
         assert fold.test_duration_days == 62
@@ -73,7 +75,20 @@ class TestGenerateWalkForwardFolds:
             step_months=2,
         )
         for fold in folds:
-            assert fold.train_end == fold.test_start
+            assert fold.train_end < fold.test_start
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"train_months": 0},
+            {"test_months": 0},
+            {"step_months": 0},
+            {"test_months": 2, "step_months": 1},
+        ],
+    )
+    def test_invalid_fold_configuration_raises(self, kwargs):
+        with pytest.raises(ValueError):
+            generate_walk_forward_folds(datetime(2020, 1, 1), datetime(2022, 1, 1), **kwargs)
 
 
 class TestOptResult:

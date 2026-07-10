@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from math import isfinite
 
 DEFAULT_MIN_WIN_RATE = 40.0
 DEFAULT_MIN_TRADES = 0
@@ -22,9 +23,13 @@ def apply_hard_filters(
 ) -> list[Mapping]:
     out = []
     for row in rows:
-        if float(row.get(DEFAULT_WIN_RATE_KEY, row.get(ALT_WIN_RATE_KEY, 0.0))) < min_win_rate:
+        win_rate = float(row.get(DEFAULT_WIN_RATE_KEY, row.get(ALT_WIN_RATE_KEY, float("nan"))))
+        trades = float(row.get(TRADES_KEY, row.get(ALT_TRADES_KEY, float("nan"))))
+        if not isfinite(win_rate) or not isfinite(trades):
             continue
-        if int(row.get(TRADES_KEY, row.get(ALT_TRADES_KEY, 0))) < min_trades:
+        if win_rate < min_win_rate:
+            continue
+        if trades < min_trades:
             continue
         out.append(row)
     return out
@@ -37,6 +42,13 @@ def rank_candidates(
     win_rate_key: str = DEFAULT_WIN_RATE_KEY,
     dd_key: str = DEFAULT_DRAWDOWN_KEY,
 ) -> list[Mapping]:
+    required_keys = (sharpe_key, pnl_key, win_rate_key, dd_key)
+    for row in rows:
+        missing = [key for key in required_keys if key not in row]
+        if missing:
+            raise ValueError(f"Candidate is missing ranking metrics: {missing}")
+        if not all(isfinite(float(row[key])) for key in required_keys):
+            raise ValueError("Candidate ranking metrics must be finite")
     return sorted(
         rows,
         key=lambda row: (

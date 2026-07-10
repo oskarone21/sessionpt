@@ -51,6 +51,20 @@ def ensure_utc_index(index: pd.Index) -> pd.DatetimeIndex:
     return ts
 
 
+def validate_datetime_index(index: pd.Index) -> pd.DatetimeIndex:
+    """Return a unique, monotonically increasing DatetimeIndex.
+
+    Causal market-data calculations depend on row order.  Failing fast avoids
+    silently incorporating later observations into earlier aggregates.
+    """
+    ts = pd.DatetimeIndex(index)
+    if not ts.is_monotonic_increasing:
+        raise ValueError("DatetimeIndex must be monotonically increasing")
+    if not ts.is_unique:
+        raise ValueError("DatetimeIndex must not contain duplicate timestamps")
+    return ts
+
+
 def get_session_labels(
     index: pd.Index,
     timezone: str = DEFAULT_TIMEZONE,
@@ -78,11 +92,12 @@ def get_session_labels(
     pd.DatetimeIndex
         Date labels representing each bar's trading session.
     """
-    ts_utc = ensure_utc_index(index)
+    ts_utc = ensure_utc_index(validate_datetime_index(index))
     ts_local = ts_utc.tz_convert(timezone)
     is_after_close = (ts_local.hour > session_close_hour).astype(np.int8)
-    labels = ts_local.normalize() + pd.to_timedelta(is_after_close, unit="D")
-    return pd.DatetimeIndex(labels)
+    local_midnights = ts_local.tz_localize(None).normalize()
+    labels = local_midnights + pd.to_timedelta(is_after_close, unit="D")
+    return pd.DatetimeIndex(labels).tz_localize(timezone)
 
 
 def get_session_ids(

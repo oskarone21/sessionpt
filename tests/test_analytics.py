@@ -1,11 +1,14 @@
 import numpy as np
+import pytest
 
 from sessionpt.analytics import (
     calculate_all_robust_metrics,
     calculate_kelly_fraction,
     calculate_max_drawdown,
     calculate_max_drawdown_duration,
+    calculate_max_drawdown_from_trades,
     calculate_sortino_ratio,
+    check_strategy_robustness,
 )
 
 
@@ -29,3 +32,22 @@ def test_sortino_kelly_and_metric_bundle():
     assert metrics["sortino_ratio"] > 0
     assert metrics["max_drawdown"] >= 0
     assert "calmar_ratio" in metrics
+
+
+def test_trade_drawdown_includes_initial_equity_baseline():
+    assert calculate_max_drawdown_from_trades(np.array([-100.0, -50.0])) == 150.0
+    assert calculate_all_robust_metrics(np.array([-100.0]))["max_drawdown"] == 100.0
+
+
+def test_sortino_uses_fixed_observation_frequency():
+    returns = np.array([2.0, -1.0, 2.0, -1.0])
+    repeated = np.tile(returns, 10)
+
+    assert calculate_sortino_ratio(returns) == pytest.approx(calculate_sortino_ratio(repeated))
+
+
+def test_non_finite_metrics_fail_closed():
+    result = check_strategy_robustness(float("nan"), 3.0, 1.0)
+    assert result["all_passed"] is False
+    with pytest.raises(ValueError, match="finite"):
+        calculate_kelly_fraction(float("nan"), 100.0, -50.0)

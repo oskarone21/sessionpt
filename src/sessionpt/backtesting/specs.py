@@ -5,6 +5,7 @@ These are the primary configuration objects passed to backtesting functions.
 """
 
 from dataclasses import dataclass
+from math import isfinite
 
 from sessionpt.constants import (
     DEFAULT_ETH_END_LOCAL,
@@ -50,10 +51,32 @@ class InstrumentSpec:
     timezone: str = DEFAULT_TIMEZONE
     session_close_hour: int = DEFAULT_SESSION_CLOSE_HOUR
 
+    def __post_init__(self) -> None:
+        if not self.symbol:
+            raise ValueError("symbol must not be empty")
+        numeric_values = (
+            self.tick_size,
+            self.tick_value,
+            self.commission_round_trip,
+            self.slippage_ticks,
+        )
+        if not all(isfinite(value) for value in numeric_values):
+            raise ValueError("instrument prices and costs must be finite")
+        if self.tick_size <= 0 or self.tick_value <= 0:
+            raise ValueError("tick_size and tick_value must be positive")
+        if self.commission_round_trip < 0 or self.slippage_ticks < 0:
+            raise ValueError("transaction costs must be non-negative")
+        if not isinstance(self.session_close_hour, int) or isinstance(
+            self.session_close_hour, bool
+        ):
+            raise ValueError("session_close_hour must be an integer")
+        if not 0 <= self.session_close_hour <= 23:
+            raise ValueError("session_close_hour must be between 0 and 23")
+
     @property
     def slippage_cost(self) -> float:
         """Total round-trip slippage cost in dollars."""
-        return float(self.slippage_ticks) * float(self.tick_value)
+        return 2.0 * float(self.slippage_ticks) * float(self.tick_value)
 
     @property
     def total_cost_per_trade(self) -> float:
@@ -105,6 +128,10 @@ class BreakevenPolicy:
     enabled: bool = False
     trigger_pct_to_tp: float = 0.5
 
+    def __post_init__(self) -> None:
+        if not isfinite(self.trigger_pct_to_tp) or not 0.0 <= self.trigger_pct_to_tp <= 1.0:
+            raise ValueError("trigger_pct_to_tp must be between 0 and 1")
+
 
 @dataclass(frozen=True)
 class TrailingStopPolicy:
@@ -127,6 +154,16 @@ class TrailingStopPolicy:
     enabled: bool = False
     trigger_ticks: float | None = None
     lock_ticks: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.enabled and (self.trigger_ticks is None or self.lock_ticks is None):
+            raise ValueError("enabled trailing stops require trigger_ticks and lock_ticks")
+        if self.trigger_ticks is not None and (
+            not isfinite(self.trigger_ticks) or self.trigger_ticks < 0
+        ):
+            raise ValueError("trigger_ticks must be non-negative")
+        if self.lock_ticks is not None and (not isfinite(self.lock_ticks) or self.lock_ticks < 0):
+            raise ValueError("lock_ticks must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -155,6 +192,15 @@ class ExecutionPolicy:
     one_trade_per_level: bool = True
     allow_concurrent_positions: bool = False
     max_days_to_hold: int = 5
+
+    def __post_init__(self) -> None:
+        integer_values = (self.max_trades_per_session, self.max_days_to_hold)
+        if any(not isinstance(value, int) or isinstance(value, bool) for value in integer_values):
+            raise ValueError("trade and holding limits must be integers")
+        if self.max_trades_per_session <= 0:
+            raise ValueError("max_trades_per_session must be positive")
+        if self.max_days_to_hold <= 0:
+            raise ValueError("max_days_to_hold must be positive")
 
 
 @dataclass(frozen=True)

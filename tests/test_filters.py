@@ -60,6 +60,16 @@ class TestCalculateTrendBias:
         nan_count = bias.isna().sum()
         assert nan_count > 0
 
+    def test_warmup_remains_undefined(self, price_df):
+        bias = calculate_trend_bias(price_df, ema_period=2, sma_period=21, htf_timeframe="1h")
+        assert bias.isna().all()
+
+    def test_flat_market_is_neutral_after_warmup(self):
+        dates = pd.date_range("2024-01-01", periods=30, freq="1h", tz="UTC")
+        df = pd.DataFrame({"Open": 100.0, "High": 100.0, "Low": 100.0, "Close": 100.0}, index=dates)
+        bias = calculate_trend_bias(df, ema_period=2, sma_period=3, timeframe="1h")
+        assert set(bias.dropna().unique()) == {0.0}
+
 
 class TestFilterByTrend:
     @pytest.fixture
@@ -88,7 +98,7 @@ class TestFilterByTrend:
         result = filter_by_trend(price_df, bias, Direction.SHORT)
         assert len(result) == len(price_df)
 
-    def test_zero_bias_returns_all(self, price_df):
+    def test_zero_bias_returns_none(self, price_df):
         bias = pd.Series(0, index=price_df.index)
         result = filter_by_trend(price_df, bias, Direction.LONG)
-        assert len(result) == len(price_df)
+        assert result.empty

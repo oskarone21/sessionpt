@@ -34,7 +34,8 @@ class EngineTradeRecord:
     pnl_dollars : float
         Profit/loss in dollars (after transaction costs).
     exit_reason : str
-        Reason for exit ('SL', 'TP', 'TRAILING_SL', 'BREAKEVEN', 'EOD', 'MAX_HOLD').
+        Reason for exit ('SL', 'TP', 'TRAILING_SL', 'BREAKEVEN', 'EOD',
+        'MAX_HOLD', or 'DATA_END').
     mfe_ticks : float
         Maximum favorable excursion in ticks.
     mae_ticks : float
@@ -111,7 +112,7 @@ class BacktestRunResult:
     profit_factor : float
         Ratio of gross wins to gross losses (inf if no losses).
     sharpe_ratio : float
-        Annualized Sharpe ratio of trade P&Ls.
+        Per-trade Sharpe ratio of trade P&Ls (not annualized).
     max_drawdown : float
         Maximum peak-to-trough drawdown in dollars.
     exit_reasons : dict

@@ -18,8 +18,13 @@ def calculate_sortino_ratio(
     target_return: float = DEFAULT_TARGET_RETURN,
     annualization_factor: float = DEFAULT_ANNUALIZATION_FACTOR,
 ) -> float:
+    returns = np.asarray(returns, dtype=float)
     if len(returns) < MIN_OBSERVATIONS:
         return 0.0
+    if annualization_factor <= 0:
+        raise ValueError("annualization_factor must be positive")
+    if not np.isfinite(returns).all() or not np.isfinite(target_return):
+        raise ValueError("returns and target_return must be finite")
 
     excess_returns = returns - target_return
     downside_returns = np.minimum(excess_returns, 0)
@@ -27,8 +32,7 @@ def calculate_sortino_ratio(
     if downside_deviation == 0:
         return 0.0 if np.mean(excess_returns) <= 0 else float("inf")
 
-    trades_per_year = min(len(returns), annualization_factor)
-    return float((np.mean(excess_returns) / downside_deviation) * np.sqrt(trades_per_year))
+    return float((np.mean(excess_returns) / downside_deviation) * np.sqrt(annualization_factor))
 
 
 def calculate_max_drawdown(equity_curve: np.ndarray) -> tuple[float, int, int]:
@@ -45,7 +49,8 @@ def calculate_max_drawdown(equity_curve: np.ndarray) -> tuple[float, int, int]:
 def calculate_max_drawdown_from_trades(trade_pnls: np.ndarray) -> float:
     if len(trade_pnls) == 0:
         return 0.0
-    max_drawdown, _, _ = calculate_max_drawdown(np.cumsum(trade_pnls))
+    equity_curve = np.concatenate(([0.0], np.cumsum(np.asarray(trade_pnls, dtype=float))))
+    max_drawdown, _, _ = calculate_max_drawdown(equity_curve)
     return max_drawdown
 
 
@@ -53,7 +58,9 @@ def profit_factor_threshold_check(
     profit_factor: float,
     min_threshold: float = 1.5,
 ) -> bool:
-    if profit_factor == float("inf") or np.isnan(profit_factor):
+    if np.isnan(profit_factor):
+        return False
+    if np.isposinf(profit_factor):
         return True
     return profit_factor >= min_threshold
 
@@ -63,9 +70,13 @@ def calculate_calmar_ratio(
     max_drawdown: float,
     years: float = DEFAULT_YEARS,
 ) -> float:
+    if not np.isfinite(total_return) or not np.isfinite(max_drawdown):
+        raise ValueError("total_return and max_drawdown must be finite")
+    if years <= 0:
+        raise ValueError("years must be positive")
     if max_drawdown <= 0:
         return 0.0 if total_return <= 0 else float("inf")
-    annualized_return = total_return / years if years > 0 else total_return
+    annualized_return = total_return / years
     return float(annualized_return / max_drawdown)
 
 
@@ -81,7 +92,10 @@ def calculate_all_robust_metrics(
             CALMAR_RATIO_KEY: 0.0,
         }
 
-    equity_curve = np.cumsum(trade_pnls)
+    trade_pnls = np.asarray(trade_pnls, dtype=float)
+    if not np.isfinite(trade_pnls).all():
+        raise ValueError("trade_pnls must be finite")
+    equity_curve = np.concatenate(([0.0], np.cumsum(trade_pnls)))
     max_drawdown, _, _ = calculate_max_drawdown(equity_curve)
     return {
         SORTINO_RATIO_KEY: calculate_sortino_ratio(trade_pnls, target_return),
@@ -98,6 +112,15 @@ def check_strategy_robustness(
     sortino_threshold: float = 2.0,
     sharpe_threshold: float = 0.5,
 ) -> dict[str, bool]:
+    if not np.isfinite([profit_factor, sortino_ratio, sharpe_ratio]).all() and not np.isposinf(
+        profit_factor
+    ):
+        return {
+            "profit_factor_ok": False,
+            "sortino_ok": False,
+            "sharpe_ok": False,
+            "all_passed": False,
+        }
     profit_factor_ok = profit_factor_threshold_check(profit_factor, pf_threshold)
     sortino_ok = sortino_ratio >= sortino_threshold
     sharpe_ok = sharpe_ratio >= sharpe_threshold
@@ -114,6 +137,8 @@ def calculate_kelly_fraction(
     avg_win: float,
     avg_loss: float,
 ) -> float:
+    if not np.isfinite([win_rate, avg_win, avg_loss]).all():
+        raise ValueError("Kelly inputs must be finite")
     if win_rate <= 0 or win_rate >= 1 or avg_win <= 0:
         return 0.0
 

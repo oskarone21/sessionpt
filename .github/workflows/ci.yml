@@ -37,3 +37,41 @@ jobs:
 
       - name: Run tests
         run: pytest
+
+  numba-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Numba test environment
+        run: pip install -e ".[dev,numba]"
+
+      - name: Run compiled-path regression tests
+        run: pytest tests/test_backtesting.py tests/test_features.py
+
+  package-and-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package, development, and documentation dependencies
+        run: pip install -e ".[dev,docs]"
+
+      - name: Run doctests and public examples
+        run: |
+          python -m doctest src/sessionpt/validation/walk_forward.py
+          for example in examples/0*.py; do python "$example"; done
+
+      - name: Build documentation and package
+        run: |
+          mkdocs build --strict
+          python -m build
+          twine check dist/*

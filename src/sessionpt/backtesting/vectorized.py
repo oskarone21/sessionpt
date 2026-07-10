@@ -4,11 +4,10 @@ This module provides a fast backtesting path using NumPy vectorization and
 optional Numba JIT compilation. It is designed for SL/TP grid optimization
 where trailing stops, breakeven, and detailed exit tracking are not needed.
 
-For full-featured backtesting (trailing stops, breakeven, EOD, etc.),
+For full-featured backtesting (trailing stops, breakeven, configurable EOD, etc.),
 use sessionpt.backtesting.engine.run_event_backtest instead.
 
-When Numba is not installed, the backtester falls back to pure-Python mode
-with a ~10-50x performance penalty.
+When Numba is not installed, the backtester falls back to pure-Python mode.
 """
 
 from dataclasses import dataclass
@@ -22,9 +21,10 @@ from sessionpt.constants import (
     DEFAULT_TIMEZONE,
     HIGH_COLUMN,
     LOW_COLUMN,
+    OPEN_COLUMN,
 )
 from sessionpt.enums.direction import Direction
-from sessionpt.sessions.core import get_session_ids
+from sessionpt.sessions.core import get_session_ids, validate_datetime_index
 
 try:
     from numba import njit
@@ -63,7 +63,7 @@ class VectorizedBacktestResult:
     profit_factor : float
         Ratio of gross wins to gross losses.
     sharpe_ratio : float
-        Annualized Sharpe ratio of trade P&Ls.
+        Per-trade Sharpe ratio of trade P&Ls (not annualized).
     max_drawdown : float
         Maximum peak-to-trough drawdown in dollars.
     """
@@ -112,6 +112,7 @@ if NUMBA_AVAILABLE:
     @njit(cache=False)
     def _process_trades_numba(
         entry_indices: np.ndarray,
+        opens: np.ndarray,
         closes: np.ndarray,
         highs: np.ndarray,
         lows: np.ndarray,
@@ -129,8 +130,7 @@ if NUMBA_AVAILABLE:
         """Numba-JIT compiled trade processing loop.
 
         Returns an array of net P&L values for each trade.
-        This replaces the Python for-loop with compiled machine code,
-        providing 10-50x speedup for the hot path.
+        This replaces the Python for-loop with compiled machine code.
         """
         n_bars = len(closes)
         max_trades = len(entry_indices)
@@ -138,6 +138,7 @@ if NUMBA_AVAILABLE:
         trade_idx = 0
         last_exit_idx = -1
         session_trade_counts: dict = {}
+        used_level_sessions: dict = {}
 
         for i in range(max_trades):
             idx = entry_indices[i]
@@ -151,6 +152,8 @@ if NUMBA_AVAILABLE:
             if sid not in session_trade_counts:
                 session_trade_counts[sid] = 0
             if session_trade_counts[sid] >= max_trades_per_day:
+                continue
+            if once_per_day_level and sid in used_level_sessions:
                 continue
 
             entry_price = closes[idx]
@@ -166,7 +169,7 @@ if NUMBA_AVAILABLE:
             exit_idx = idx
             exit_price = entry_price
             pnl_ticks = 0.0
-            hit = False
+            closed = False
 
             for j in range(idx + 1, n_bars):
                 if session_ids[j] != sid_entry:
@@ -176,15 +179,41 @@ if NUMBA_AVAILABLE:
                         pnl_ticks = (exit_price - entry_price) / tick_size
                     else:
                         pnl_ticks = (entry_price - exit_price) / tick_size
+                    closed = True
                     break
 
+                open_value = opens[j]
                 h_val = highs[j]
                 l_val = lows[j]
 
                 if is_long:
+                    if open_value <= sl_price:
+                        exit_idx = j
+                        exit_price = open_value
+                        pnl_ticks = (exit_price - entry_price) / tick_size
+                        closed = True
+                        break
+                    if open_value >= tp_price:
+                        exit_idx = j
+                        exit_price = tp_price
+                        pnl_ticks = tp_ticks
+                        closed = True
+                        break
                     tp_hit = h_val >= tp_price
                     sl_hit = l_val <= sl_price
                 else:
+                    if open_value >= sl_price:
+                        exit_idx = j
+                        exit_price = open_value
+                        pnl_ticks = (entry_price - exit_price) / tick_size
+                        closed = True
+                        break
+                    if open_value <= tp_price:
+                        exit_idx = j
+                        exit_price = tp_price
+                        pnl_ticks = tp_ticks
+                        closed = True
+                        break
                     tp_hit = l_val <= tp_price
                     sl_hit = h_val >= sl_price
 
@@ -195,13 +224,13 @@ if NUMBA_AVAILABLE:
                         pnl_ticks = (sl_price - entry_price) / tick_size
                     else:
                         pnl_ticks = (entry_price - sl_price) / tick_size
-                    hit = True
+                    closed = True
                     break
                 elif tp_hit:
                     exit_idx = j
                     exit_price = tp_price
                     pnl_ticks = tp_ticks
-                    hit = True
+                    closed = True
                     break
                 elif sl_hit:
                     exit_idx = j
@@ -210,10 +239,10 @@ if NUMBA_AVAILABLE:
                         pnl_ticks = (sl_price - entry_price) / tick_size
                     else:
                         pnl_ticks = (entry_price - sl_price) / tick_size
-                    hit = True
+                    closed = True
                     break
 
-            if not hit:
+            if not closed:
                 exit_idx = n_bars - 1
                 exit_price = closes[exit_idx]
                 if is_long:
@@ -228,6 +257,8 @@ if NUMBA_AVAILABLE:
 
             last_exit_idx = exit_idx
             session_trade_counts[sid] += 1
+            if once_per_day_level:
+                used_level_sessions[sid] = True
 
         return trades[:trade_idx]
 
@@ -236,9 +267,9 @@ class VectorizedBacktester:
     """Fast vectorized backtester for SL/TP parameter sweeps.
 
     Designed for rapid grid search over stop-loss and take-profit parameters.
-    Supports session-aware trade limits but does NOT support trailing stops,
-    breakeven stops, or EOD close logic. For those features, use
-    run_event_backtest instead.
+    Supports mandatory session-boundary exits and session-aware trade limits,
+    but does not support trailing or breakeven stops. For configurable EOD and
+    dynamic-stop behavior, use run_event_backtest instead.
 
     Parameters
     ----------
@@ -251,7 +282,9 @@ class VectorizedBacktester:
     slippage_cost : float
         Total slippage cost per trade in dollars.
     max_trades_per_day : int
-        Maximum number of trades per calendar day.
+        Maximum number of trades per trading session.
+    once_per_day_level : bool
+        If True, accept at most one trade per level per trading session.
     timezone : str
         Exchange timezone string.
     session_close_hour : int
@@ -265,14 +298,33 @@ class VectorizedBacktester:
         commission: float,
         slippage_cost: float = 0.0,
         max_trades_per_day: int = 10,
+        once_per_day_level: bool = True,
         timezone: str = DEFAULT_TIMEZONE,
         session_close_hour: int = DEFAULT_SESSION_CLOSE_HOUR,
     ):
+        numeric_values = (tick_size, tick_value, commission, slippage_cost)
+        if not np.isfinite(numeric_values).all():
+            raise ValueError("prices and transaction costs must be finite")
+        if tick_size <= 0 or tick_value <= 0:
+            raise ValueError("tick_size and tick_value must be positive")
+        if commission < 0 or slippage_cost < 0:
+            raise ValueError("transaction costs must be non-negative")
+        if not isinstance(max_trades_per_day, int) or isinstance(max_trades_per_day, bool):
+            raise ValueError("max_trades_per_day must be an integer")
+        if max_trades_per_day <= 0:
+            raise ValueError("max_trades_per_day must be positive")
+        if not isinstance(once_per_day_level, bool):
+            raise ValueError("once_per_day_level must be boolean")
+        if not isinstance(session_close_hour, int) or isinstance(session_close_hour, bool):
+            raise ValueError("session_close_hour must be an integer")
+        if not 0 <= session_close_hour <= 23:
+            raise ValueError("session_close_hour must be between 0 and 23")
         self.tick_size = tick_size
         self.tick_value = tick_value
         self.commission = commission
         self.slippage_cost = slippage_cost
         self.max_trades_per_day = max_trades_per_day
+        self.once_per_day_level = once_per_day_level
         self.timezone = timezone
         self.session_close_hour = session_close_hour
         self._session_cache: dict[bytes | str, np.ndarray] = {}
@@ -330,11 +382,19 @@ class VectorizedBacktester:
             Backtest summary statistics.
         """
         data = df[df.index >= start_date] if start_date else df
+        validate_datetime_index(data.index)
+        if direction not in (Direction.LONG, Direction.SHORT):
+            raise ValueError(f"Unsupported direction: {direction}")
+        if sl_points <= 0 or tp_points <= 0:
+            raise ValueError("sl_points and tp_points must be positive")
 
-        closes = data[CLOSE_COLUMN].values
-        highs = data[HIGH_COLUMN].values
-        lows = data[LOW_COLUMN].values
-        levels = data[level_col].values
+        opens = data[OPEN_COLUMN].to_numpy(dtype=float)
+        closes = data[CLOSE_COLUMN].to_numpy(dtype=float)
+        highs = data[HIGH_COLUMN].to_numpy(dtype=float)
+        lows = data[LOW_COLUMN].to_numpy(dtype=float)
+        levels = data[level_col].to_numpy(dtype=float)
+        if not np.isfinite([opens, closes, highs, lows]).all():
+            raise ValueError("OHLC inputs must be finite")
         is_long = direction == Direction.LONG
 
         if is_long:
@@ -369,6 +429,7 @@ class VectorizedBacktester:
         if NUMBA_AVAILABLE:
             trade_pnls = _process_trades_numba(
                 entry_indices,
+                opens,
                 closes,
                 highs,
                 lows,
@@ -381,11 +442,12 @@ class VectorizedBacktester:
                 total_cost,
                 session_ids,
                 max_trades_per_day=self.max_trades_per_day,
-                once_per_day_level=True,
+                once_per_day_level=self.once_per_day_level,
             )
         else:
             trade_pnls = self._process_trades_python(
                 entry_indices,
+                opens,
                 closes,
                 highs,
                 lows,
@@ -418,18 +480,20 @@ class VectorizedBacktester:
         avg_pnl = float(np.mean(trade_pnls))
         gross_wins = float(np.sum(np.maximum(trade_pnls, 0)))
         gross_losses = float(abs(np.sum(np.minimum(trade_pnls, 0))))
-        profit_factor = gross_wins / gross_losses if gross_losses > 0 else float("inf")
+        profit_factor = (
+            gross_wins / gross_losses
+            if gross_losses > 0
+            else (float("inf") if gross_wins > 0 else 0.0)
+        )
 
-        cumulative = np.cumsum(trade_pnls)
+        cumulative = np.concatenate(([0.0], np.cumsum(trade_pnls)))
         running_max = np.maximum.accumulate(cumulative)
         drawdowns = running_max - cumulative
         max_dd = float(np.max(drawdowns))
 
         if len(trade_pnls) > 1:
             std = np.std(trade_pnls, ddof=1)
-            sharpe = (
-                float((np.mean(trade_pnls) / std) * np.sqrt(len(trade_pnls))) if std > 0 else 0.0
-            )
+            sharpe = float(np.mean(trade_pnls) / std) if std > 0 else 0.0
         else:
             sharpe = 0.0
 
@@ -448,6 +512,7 @@ class VectorizedBacktester:
     def _process_trades_python(
         self,
         entry_indices: np.ndarray,
+        opens: np.ndarray,
         closes: np.ndarray,
         highs: np.ndarray,
         lows: np.ndarray,
@@ -465,6 +530,7 @@ class VectorizedBacktester:
         trade_pnls = []
         last_exit_idx = -1
         session_trade_counts: dict[int, int] = {}
+        used_level_sessions: set[int] = set()
 
         for idx in entry_indices:
             if idx <= last_exit_idx:
@@ -476,6 +542,8 @@ class VectorizedBacktester:
             sid = int(session_ids[idx])
             session_trade_counts.setdefault(sid, 0)
             if session_trade_counts[sid] >= self.max_trades_per_day:
+                continue
+            if self.once_per_day_level and sid in used_level_sessions:
                 continue
 
             entry_price = closes[idx]
@@ -490,41 +558,74 @@ class VectorizedBacktester:
 
             exit_idx = idx
             exit_price = entry_price
+            closed = False
 
             for j in range(idx + 1, n_bars):
                 if session_ids[j] != sid_entry:
                     exit_idx = j - 1
                     exit_price = closes[exit_idx]
+                    closed = True
                     break
+                open_value = opens[j]
                 h_val = highs[j]
                 l_val = lows[j]
 
                 if is_long:
+                    if open_value <= sl_price:
+                        exit_idx = j
+                        exit_price = open_value
+                        closed = True
+                        break
+                    if open_value >= tp_price:
+                        exit_idx = j
+                        exit_price = tp_price
+                        closed = True
+                        break
                     if h_val >= tp_price and l_val <= sl_price:
                         exit_idx = j
                         exit_price = sl_price
+                        closed = True
                         break
                     if h_val >= tp_price:
                         exit_idx = j
                         exit_price = tp_price
+                        closed = True
                         break
                     if l_val <= sl_price:
                         exit_idx = j
                         exit_price = sl_price
+                        closed = True
                         break
                 else:
+                    if open_value >= sl_price:
+                        exit_idx = j
+                        exit_price = open_value
+                        closed = True
+                        break
+                    if open_value <= tp_price:
+                        exit_idx = j
+                        exit_price = tp_price
+                        closed = True
+                        break
                     if l_val <= tp_price and h_val >= sl_price:
                         exit_idx = j
                         exit_price = sl_price
+                        closed = True
                         break
                     if l_val <= tp_price:
                         exit_idx = j
                         exit_price = tp_price
+                        closed = True
                         break
                     if h_val >= sl_price:
                         exit_idx = j
                         exit_price = sl_price
+                        closed = True
                         break
+
+            if not closed:
+                exit_idx = n_bars - 1
+                exit_price = closes[exit_idx]
 
             if is_long:
                 pnl_ticks = (exit_price - entry_price) / tick_size
@@ -534,5 +635,7 @@ class VectorizedBacktester:
             trade_pnls.append(net_pnl)
             last_exit_idx = exit_idx
             session_trade_counts[sid] += 1
+            if self.once_per_day_level:
+                used_level_sessions.add(sid)
 
         return np.array(trade_pnls)

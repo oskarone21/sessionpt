@@ -1,8 +1,10 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from sessionpt.features import (
     add_rth_anchored_vwap,
+    build_atr_mask,
     build_volume_mask,
     combine_entry_masks,
     compute_atr,
@@ -24,6 +26,20 @@ def test_compute_atr_returns_wilder_series_with_warmup():
     assert np.isnan(atr[1])
     assert np.isfinite(atr[2])
     assert len(atr) == len(closes)
+
+
+def test_atr_percentile_mask_is_prefix_causal():
+    prefix = np.array([1.0, 2.0, 3.0])
+    extended = np.array([1.0, 2.0, 3.0, 100.0])
+
+    assert build_atr_mask(prefix, 50).tolist() == build_atr_mask(extended, 50)[:3].tolist()
+
+
+def test_compiled_indicator_inputs_require_equal_non_empty_arrays():
+    with pytest.raises(ValueError, match="equal lengths"):
+        compute_atr(np.array([2.0]), np.array([1.0, 1.0]), np.array([1.5, 1.5]))
+    with pytest.raises(ValueError, match="must not be empty"):
+        compute_vwap(*(np.array([]) for _ in range(5)))
 
 
 def test_compute_vwap_resets_by_session_id():
@@ -74,6 +90,17 @@ def test_rth_vwap_resets_at_session_open():
     assert np.isnan(out.loc[idx[0], "rth_vwap"])
     assert abs(out.loc[idx[1], "rth_vwap"] - tp1) < 1e-9
     assert abs(out.loc[idx[2], "rth_vwap"] - ((tp1 * 2 + tp2 * 2) / 4)) < 1e-9
+
+
+def test_rth_vwap_rejects_unsorted_input():
+    idx = pd.DatetimeIndex(["2024-01-02 14:31:00+00:00", "2024-01-02 14:30:00+00:00"])
+    df = pd.DataFrame(
+        {"Open": [1, 1], "High": [1, 1], "Low": [1, 1], "Close": [1, 1], "Volume": [1, 1]},
+        index=idx,
+    )
+
+    with pytest.raises(ValueError, match="monotonically increasing"):
+        add_rth_anchored_vwap(df)
 
 
 def test_volume_wick_nmin_and_mask_helpers():

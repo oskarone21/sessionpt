@@ -1,3 +1,3 @@
 # Changelog
 
-See the full changelog in the repository root: [CHANGELOG.md](../CHANGELOG.md)
+See the [full changelog on GitHub](https://github.com/oskarone21/sessionpt/blob/main/CHANGELOG.md).

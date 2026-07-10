@@ -58,6 +58,39 @@ class TestGetSessionLabels:
         labels = get_session_labels(idx, timezone="America/New_York", session_close_hour=17)
         assert labels[0].date() == pd.Timestamp("2024-01-08").date()
 
+    @pytest.mark.parametrize(
+        ("evening", "daytime"),
+        [
+            ("2024-03-10 18:00", "2024-03-11 10:00"),
+            ("2024-11-03 18:00", "2024-11-04 10:00"),
+        ],
+    )
+    def test_dst_transition_session_has_one_normalized_label(self, evening, daytime):
+        idx = pd.DatetimeIndex(
+            [
+                pd.Timestamp(evening, tz="America/New_York"),
+                pd.Timestamp(daytime, tz="America/New_York"),
+            ]
+        )
+
+        labels = get_session_labels(idx)
+        session_ids = get_session_ids(idx)
+
+        assert labels[0] == labels[1]
+        assert labels[0].hour == 0
+        assert session_ids[0] == session_ids[1]
+
+    def test_unsorted_session_input_is_rejected(self):
+        idx = pd.DatetimeIndex(
+            [
+                pd.Timestamp("2024-01-08 10:00", tz="UTC"),
+                pd.Timestamp("2024-01-08 09:00", tz="UTC"),
+            ]
+        )
+
+        with pytest.raises(ValueError, match="monotonically increasing"):
+            get_session_labels(idx)
+
 
 class TestGetSessionIds:
     def test_session_ids_are_ints(self):

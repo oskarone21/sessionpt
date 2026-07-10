@@ -11,7 +11,8 @@ This module provides two execution paths:
    inner loop for rapid parameter sweeps over SL/TP grids. Falls back to
    pure Python when Numba is not installed.
 
-Both paths produce the same ``BacktestRunResult`` type for consistency.
+The event path returns ``BacktestRunResult``; the vectorized path returns its
+lighter ``VectorizedBacktestResult`` summary.
 """
 
 from sessionpt.backtesting.engine import (

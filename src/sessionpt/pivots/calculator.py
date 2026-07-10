@@ -20,6 +20,7 @@ from sessionpt.constants import (
     LOW_COLUMN,
     OPEN_COLUMN,
     PIVOT_CENTRAL_COLUMN,
+    PIVOT_LEVEL_COLUMNS,
     PIVOT_R1_COLUMN,
     PIVOT_R2_COLUMN,
     PIVOT_R3_COLUMN,
@@ -28,6 +29,7 @@ from sessionpt.constants import (
     PIVOT_S3_COLUMN,
 )
 from sessionpt.enums.pivot_type import PivotType
+from sessionpt.sessions.core import validate_datetime_index
 
 StandardPivotCalculator = Callable[[float, float, float], dict[str, float]]
 
@@ -197,6 +199,14 @@ def calculate_pivot_levels(
         DataFrame with columns P, R1, R2, R3, S1, S2, S3,
         indexed by session date (shifted forward by one row).
     """
+    validate_datetime_index(daily_df.index)
+    if len(daily_df) < 2:
+        empty = pd.DataFrame(columns=PIVOT_LEVEL_COLUMNS, dtype=float)
+        empty.index.name = "date"
+        return empty
+    if pivot_type != PivotType.DM and pivot_type not in STANDARD_PIVOT_CALCULATORS:
+        raise ValueError(f"Unsupported pivot type: {pivot_type}")
+
     pivots_list: list[dict[str, object]] = []
 
     for i in range(len(daily_df) - 1):
@@ -212,7 +222,7 @@ def calculate_pivot_levels(
         if pivot_type == PivotType.DM:
             levels = calculate_dm_pivots(high, low_price, close, open_price)
         else:
-            calc_func = STANDARD_PIVOT_CALCULATORS.get(pivot_type, calculate_traditional_pivots)
+            calc_func = STANDARD_PIVOT_CALCULATORS[pivot_type]
             levels = calc_func(high, low_price, close)
 
         pivots_list.append({**levels, "date": next_date})

@@ -7,7 +7,7 @@ import pandas as pd
 
 from sessionpt.constants import DEFAULT_TIMEZONE, HIGH_COLUMN, LOW_COLUMN
 from sessionpt.features import add_rth_anchored_vwap
-from sessionpt.sessions import ensure_utc_index
+from sessionpt.sessions.core import ensure_utc_index, validate_datetime_index
 
 IB_SESSION_LABEL_COLUMN = "ib_session_label"
 IB_SESSION_ID_COLUMN = "ib_session_id"
@@ -71,6 +71,35 @@ def _add_minutes(hhmm: str, minutes: int) -> str:
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+def _local_clock_timestamp(reference: pd.Timestamp, hhmm: str) -> pd.Timestamp:
+    hour, minute = _time_parts(hhmm)
+    naive = pd.Timestamp(reference.date()) + pd.Timedelta(hours=hour, minutes=minute)
+    return naive.tz_localize(reference.tz)
+
+
+def _has_complete_ib_window(
+    ib_group: pd.DataFrame,
+    start_hhmm: str,
+    end_hhmm: str,
+) -> bool:
+    if len(ib_group) < 2:
+        return False
+    times = pd.DatetimeIndex(ib_group[TEMP_LOCAL_TS_COLUMN])
+    differences = times[1:] - times[:-1]
+    cadence = differences[0]
+    if cadence <= pd.Timedelta(0) or any(difference != cadence for difference in differences):
+        return False
+
+    window_start = _local_clock_timestamp(times[0], start_hhmm)
+    window_end = _local_clock_timestamp(times[0], end_hhmm)
+    if window_end <= window_start:
+        window_end += pd.DateOffset(days=1)
+
+    covers_window = times[0] == window_start and times[-1] + cadence >= window_end
+    valid_prices = np.isfinite(ib_group[[HIGH_COLUMN, LOW_COLUMN]].to_numpy(dtype=float)).all()
+    return bool(covers_window and valid_prices)
+
+
 def add_initial_balance_levels(
     df: pd.DataFrame,
     timezone: str = DEFAULT_TIMEZONE,
@@ -86,7 +115,9 @@ def add_initial_balance_levels(
     if out.empty:
         return out
 
-    ts_utc = ensure_utc_index(out.index)
+    if ib_window_minutes <= 0:
+        raise ValueError("ib_window_minutes must be positive")
+    ts_utc = ensure_utc_index(validate_datetime_index(out.index))
     ts_local = ts_utc.tz_convert(timezone)
     out[TEMP_LOCAL_TS_COLUMN] = ts_local
     local_dates = ts_local.normalize().tz_localize(None)
@@ -96,7 +127,7 @@ def add_initial_balance_levels(
     if rth_end_local is not None:
         out[RTH_ACTIVE_COLUMN] = _build_local_time_mask(ts_local, rth_start, rth_end_local)
     else:
-        out[RTH_ACTIVE_COLUMN] = True
+        out[RTH_ACTIVE_COLUMN] = _build_local_time_mask(ts_local, rth_start, "24:00")
 
     ib_end_local = _add_minutes(ib_start_local, ib_window_minutes)
     out[IB_IN_WINDOW_COLUMN] = _build_local_time_mask(ts_local, ib_start_local, ib_end_local)
@@ -122,11 +153,17 @@ def add_initial_balance_levels(
         ib_range = ib_high - ib_low
         out.loc[group.index, IB_WINDOW_BAR_COUNT_COLUMN] = int(bar_count)
 
-        if bar_count < ib_window_minutes or not np.isfinite(ib_range) or ib_range <= 0:
+        if (
+            not _has_complete_ib_window(ib_group, ib_start_local, ib_end_local)
+            or not np.isfinite(ib_range)
+            or ib_range <= 0
+        ):
             continue
 
-        ib_end_time = ib_group[TEMP_LOCAL_TS_COLUMN].max()
-        eligible_index = group.index[group[TEMP_LOCAL_TS_COLUMN] > ib_end_time]
+        window_end = _local_clock_timestamp(
+            pd.Timestamp(ib_group[TEMP_LOCAL_TS_COLUMN].iloc[0]), ib_end_local
+        )
+        eligible_index = group.index[group[TEMP_LOCAL_TS_COLUMN] >= window_end]
         if len(eligible_index) == 0:
             continue
 

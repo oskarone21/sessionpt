@@ -29,6 +29,7 @@ class ExitReason(Enum):
     BREAKEVEN = 'BREAKEVEN'
     EOD = 'EOD'
     MAX_HOLD = 'MAX_HOLD'
+    DATA_END = 'DATA_END'
 ```
 
 Reason a trade was closed.
@@ -283,7 +284,7 @@ class InstrumentSpec:
     tick_size: float          # minimum price increment (e.g. 0.10 for GC)
     tick_value: float         # dollar value per tick (e.g. 10 for GC)
     commission_round_trip: float
-    slippage_ticks: float
+    slippage_ticks: float       # estimated ticks per side
     timezone: str             # exchange timezone
     session_close_hour: int   # local hour of session close
 ```
@@ -411,13 +412,11 @@ class VectorizedBacktester:
     def run(self, df, level_col, direction, sl_points, tp_points,
             start_date=None, entry_filter_mask=None) -> VectorizedBacktestResult: ...
 
-    def run_with_details(self, df, level_col, direction, sl_points, tp_points,
-                         start_date=None, entry_filter_mask=None) -> DetailedBacktestResult: ...
 ```
 
 High-speed Numba-accelerated backtester for SL/TP parameter sweeps. SL and
-TP are specified in **ticks**. `run()` returns summary stats; `run_with_details()`
-adds per-trade `TradeDetail` records.
+TP are specified in **ticks**. `run()` returns aggregate summary statistics;
+use the event backtester when per-trade records are required.
 
 ---
 

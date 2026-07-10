@@ -53,7 +53,8 @@ The **event backtester** processes each bar sequentially, supporting:
 - **End-of-day (EOD) close** at the session boundary
 - **Trailing stop** — activate after `trigger_ticks`, lock at `entry ± lock_ticks`
 - **Breakeven stop** — move stop to entry at `trigger_pct_to_tp` of the TP distance
-- **Max hold** — force exit after N days (when `close_at_eod=False`)
+- **Max hold** — force exit after N elapsed calendar days (when `close_at_eod=False`)
+- **Gap-aware stops** — gap-through stops fill at the next bar's open
 
 ```python
 from sessionpt import (
@@ -77,7 +78,7 @@ result = run_event_backtest(
 ```
 
 Exit reasons in the result: `TP`, `SL`, `TRAILING_SL`, `BREAKEVEN`, `EOD`,
-`MAX_HOLD`.
+`MAX_HOLD`, `DATA_END`.
 
 ---
 
@@ -101,8 +102,8 @@ result = bt.run(
 print(f"Trades: {result.trades}  PF: {result.profit_factor:.2f}")
 ```
 
-Use `run_with_details()` to also get per-trade `TradeDetail` records with
-entry/exit times, prices, and P&L.
+The vectorized path returns aggregate results. Use `run_event_backtest()` when
+per-trade records or configurable EOD behavior are required.
 
 ---
 
@@ -128,7 +129,9 @@ folds = generate_walk_forward_folds(
 
 Each `WalkForwardFold` contains `train_start`, `train_end`, `test_start`,
 `test_end` timestamps, and convenience properties `train_duration_days` and
-`test_duration_days`.
+`test_duration_days`. Endpoints are inclusive and generated train/test windows
+are disjoint. `step_months` must be at least `test_months` so OOS windows do not
+overlap.
 
 ### OOS Testing
 

@@ -1,5 +1,6 @@
 import pandas as pd
 
+from sessionpt.enums import PivotType
 from sessionpt.pivots import (
     apply_directional_pivot_shift,
     calculate_all_pivot_types,
@@ -36,3 +37,26 @@ def test_pivot_confluence_helpers_find_aligned_levels():
     assert zones
     assert count >= 1
     assert labels
+
+
+def test_confluence_supports_demark_and_negative_prices():
+    all_pivots = calculate_all_pivot_types(
+        high=-5.0,
+        low=-15.0,
+        close=-10.0,
+        open_price=-12.0,
+        pivot_types=[PivotType.DM],
+    )
+    target = all_pivots[PivotType.DM.value]["P"]
+
+    count, labels = get_confluence_at_level(
+        -5.0,
+        -15.0,
+        -10.0,
+        target_price=target,
+        pivot_types=[PivotType.DM],
+        open_price=-12.0,
+    )
+
+    assert count >= 1
+    assert labels == ["dm_P", "dm_R2", "dm_R3", "dm_S2", "dm_S3"]

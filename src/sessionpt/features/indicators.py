@@ -21,6 +21,18 @@ DEFAULT_ATR_PERIOD = 14
 DEFAULT_VOLUME_LOOKBACK = 20
 
 
+def _as_float_arrays(*arrays: np.ndarray) -> tuple[np.ndarray, ...]:
+    converted = tuple(np.asarray(array, dtype=np.float64) for array in arrays)
+    if any(array.ndim != 1 for array in converted):
+        raise ValueError("Indicator inputs must be one-dimensional")
+    lengths = {len(array) for array in converted}
+    if len(lengths) != 1:
+        raise ValueError("Indicator inputs must have equal lengths")
+    if not converted or len(converted[0]) == 0:
+        raise ValueError("Indicator inputs must not be empty")
+    return converted
+
+
 @njit(cache=False)
 def _atr_numba(
     highs: np.ndarray,
@@ -63,11 +75,14 @@ def compute_atr(
 ) -> np.ndarray:
     """Compute Wilder ATR aligned to the input bars."""
 
+    if period <= 0:
+        raise ValueError("period must be positive")
+    highs_float, lows_float, closes_float = _as_float_arrays(highs, lows, closes)
     return np.asarray(
         _atr_numba(
-            highs.astype(np.float64),
-            lows.astype(np.float64),
-            closes.astype(np.float64),
+            highs_float,
+            lows_float,
+            closes_float,
             int(period),
         ),
         dtype=np.float64,
@@ -75,13 +90,26 @@ def compute_atr(
 
 
 def build_atr_mask(atr: np.ndarray, min_percentile: float) -> np.ndarray:
-    """Return true where ATR is at or above the requested percentile."""
+    """Return a prefix-causal ATR percentile mask.
 
-    valid = ~np.isnan(atr)
+    Each row is compared only with the distribution available before that row.
+    """
+    if not 0.0 <= min_percentile <= 100.0:
+        raise ValueError("min_percentile must be between 0 and 100")
+    atr_float = np.asarray(atr, dtype=np.float64)
+    if atr_float.ndim != 1:
+        raise ValueError("atr must be one-dimensional")
+    valid = ~np.isnan(atr_float)
     if not np.any(valid):
-        return np.zeros(len(atr), dtype=bool)
-    threshold = np.percentile(atr[valid], min_percentile)
-    return np.asarray(valid & (atr >= threshold), dtype=bool)
+        return np.zeros(len(atr_float), dtype=bool)
+    thresholds = (
+        pd.Series(atr_float)
+        .expanding(min_periods=1)
+        .quantile(min_percentile / 100.0)
+        .shift(1)
+        .to_numpy()
+    )
+    return np.asarray(valid & ~np.isnan(thresholds) & (atr_float >= thresholds), dtype=bool)
 
 
 @njit(cache=False)
@@ -127,13 +155,19 @@ def compute_vwap(
 ) -> np.ndarray:
     """Compute session-reset VWAP aligned to the input bars."""
 
+    highs_float, lows_float, closes_float, volumes_float = _as_float_arrays(
+        highs, lows, closes, volumes
+    )
+    session_ids_array = np.asarray(session_ids)
+    if session_ids_array.ndim != 1 or len(session_ids_array) != len(closes_float):
+        raise ValueError("session_ids must be one-dimensional and match price inputs")
     return np.asarray(
         _vwap_numba(
-            highs.astype(np.float64),
-            lows.astype(np.float64),
-            closes.astype(np.float64),
-            volumes.astype(np.float64),
-            session_ids.astype(np.int64),
+            highs_float,
+            lows_float,
+            closes_float,
+            volumes_float,
+            session_ids_array.astype(np.int64),
         ),
         dtype=np.float64,
     )
@@ -153,7 +187,9 @@ def compute_volume_ratio(
 ) -> np.ndarray:
     """Compute current volume divided by rolling mean volume."""
 
-    volume = volumes.astype(np.float64)
+    if lookback <= 0:
+        raise ValueError("lookback must be positive")
+    (volume,) = _as_float_arrays(volumes)
     rolling_mean = pd.Series(volume).rolling(lookback, min_periods=1).mean().to_numpy()
     safe_mean = np.where(rolling_mean > EPSILON, rolling_mean, 1.0)
     return np.asarray(volume / safe_mean, dtype=np.float64)
@@ -171,10 +207,9 @@ def compute_wick_ratios(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute lower and upper wick fractions of total bar range."""
 
-    opens_float = opens.astype(np.float64)
-    highs_float = highs.astype(np.float64)
-    lows_float = lows.astype(np.float64)
-    closes_float = closes.astype(np.float64)
+    opens_float, highs_float, lows_float, closes_float = _as_float_arrays(
+        opens, highs, lows, closes
+    )
 
     bar_range = highs_float - lows_float
     safe_range = np.where(bar_range < EPSILON, EPSILON, bar_range)
@@ -207,15 +242,21 @@ def compute_nmin_entry_signal(
 ) -> np.ndarray:
     """Compute rolling N-bar touch and close-confirmation entry signal."""
 
-    if n_bars <= 1:
-        touch = (lows <= levels) & (highs >= levels)
-        close_mask = closes > levels if is_long else closes < levels
+    if n_bars <= 0:
+        raise ValueError("n_bars must be positive")
+    highs_float, lows_float, closes_float, levels_float = _as_float_arrays(
+        highs, lows, closes, levels
+    )
+
+    if n_bars == 1:
+        touch = (lows_float <= levels_float) & (highs_float >= levels_float)
+        close_mask = closes_float > levels_float if is_long else closes_float < levels_float
         return np.asarray(touch & close_mask, dtype=bool)
 
-    rolling_min_low = pd.Series(lows).rolling(n_bars, min_periods=n_bars).min().to_numpy()
-    rolling_max_high = pd.Series(highs).rolling(n_bars, min_periods=n_bars).max().to_numpy()
-    touch_mask = (rolling_min_low <= levels) & (rolling_max_high >= levels)
-    close_mask = closes > levels if is_long else closes < levels
+    rolling_min_low = pd.Series(lows_float).rolling(n_bars, min_periods=n_bars).min().to_numpy()
+    rolling_max_high = pd.Series(highs_float).rolling(n_bars, min_periods=n_bars).max().to_numpy()
+    touch_mask = (rolling_min_low <= levels_float) & (rolling_max_high >= levels_float)
+    close_mask = closes_float > levels_float if is_long else closes_float < levels_float
     return np.asarray(~np.isnan(rolling_min_low) & touch_mask & close_mask, dtype=bool)
 
 
@@ -231,7 +272,11 @@ def combine_entry_masks(
     if not active:
         return None
 
-    result = active[0].copy()
+    lengths = {len(mask) for mask in active}
+    if len(lengths) != 1:
+        raise ValueError("Entry masks must have equal lengths")
+
+    result = np.asarray(active[0], dtype=bool).copy()
     for mask in active[1:]:
-        result &= mask
+        result &= np.asarray(mask, dtype=bool)
     return result

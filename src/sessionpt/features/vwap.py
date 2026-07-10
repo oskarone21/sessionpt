@@ -12,7 +12,7 @@ from sessionpt.constants import (
     LOW_COLUMN,
     VOLUME_COLUMN,
 )
-from sessionpt.sessions import ensure_utc_index
+from sessionpt.sessions.core import ensure_utc_index, validate_datetime_index
 
 RTH_ACTIVE_COLUMN = "rth_active"
 RTH_SESSION_LABEL_COLUMN = "rth_session_label"
@@ -58,7 +58,7 @@ def add_rth_anchored_vwap(
         raise KeyError(f"{VOLUME_COLUMN} column is required for VWAP computation")
 
     out = df.copy()
-    ts_utc = ensure_utc_index(out.index)
+    ts_utc = ensure_utc_index(validate_datetime_index(out.index))
     ts_local = ts_utc.tz_convert(timezone)
     active_mask = _local_time_mask(ts_local, rth_start_local, rth_end_local)
 

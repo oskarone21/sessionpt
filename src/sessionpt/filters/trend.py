@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from sessionpt.enums.direction import Direction
+from sessionpt.sessions.core import validate_datetime_index
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,8 @@ def calculate_trend_bias(
 ) -> pd.Series:
     """Calculate trend bias from EMA/SMA crossover on a higher timeframe.
 
-    The bias is +1 (bullish) when EMA > SMA and -1 (bearish) when EMA < SMA.
+    The bias is +1 (bullish) when EMA > SMA, -1 (bearish) when EMA < SMA,
+    and 0 when the averages are equal.
     A one-bar lag is applied on the higher timeframe to prevent look-ahead
     bias: the bias from HTF candle close at time *T* is only valid from *T+1*
     onward.
@@ -82,12 +84,15 @@ def calculate_trend_bias(
     Returns
     -------
     pd.Series
-        Series of +1 / -1 values aligned to ``df.index``, with NaN during
+        Series of +1 / 0 / -1 values aligned to ``df.index``, with NaN during
         the warm-up period where the SMA has insufficient data.
     """
     selected_timeframe = timeframe or htf_timeframe
     if selected_timeframe is None:
         raise ValueError("calculate_trend_bias requires timeframe or htf_timeframe")
+    if ema_period <= 0 or sma_period <= 0:
+        raise ValueError("ema_period and sma_period must be positive")
+    validate_datetime_index(df.index)
 
     htf_df = (
         df[["Open", "High", "Low", "Close"]]
@@ -99,7 +104,11 @@ def calculate_trend_bias(
     htf_df["ema"] = htf_df["Close"].ewm(span=ema_period, adjust=False).mean()
     htf_df["sma"] = htf_df["Close"].rolling(window=sma_period).mean()
 
-    htf_df["trend_bias"] = np.where(htf_df["ema"] > htf_df["sma"], 1, -1)
+    valid = htf_df[["ema", "sma"]].notna().all(axis=1)
+    htf_df["trend_bias"] = np.nan
+    htf_df.loc[valid & (htf_df["ema"] > htf_df["sma"]), "trend_bias"] = 1.0
+    htf_df.loc[valid & (htf_df["ema"] < htf_df["sma"]), "trend_bias"] = -1.0
+    htf_df.loc[valid & (htf_df["ema"] == htf_df["sma"]), "trend_bias"] = 0.0
 
     htf_df["trend_bias_lagged"] = htf_df["trend_bias"].shift(1)
 
@@ -129,15 +138,14 @@ def filter_by_trend(
     pd.DataFrame
         Subset of *df* where the trend bias aligns with *direction*.
         Rows where the bias is NaN (warm-up period) are excluded.
-        If all bias values are NaN or zero, returns *df* unfiltered.
+        If all bias values are NaN or zero, returns an empty frame.
     """
     aligned_bias = trend_bias.reindex(df.index, method="ffill")
-
-    if (aligned_bias == 0).all() or aligned_bias.isna().all():
-        return df
 
     valid_mask = aligned_bias.notna()
 
     if direction == Direction.LONG:
         return df[valid_mask & (aligned_bias == 1)]
-    return df[valid_mask & (aligned_bias == -1)]
+    if direction == Direction.SHORT:
+        return df[valid_mask & (aligned_bias == -1)]
+    raise ValueError(f"Unsupported direction: {direction}")

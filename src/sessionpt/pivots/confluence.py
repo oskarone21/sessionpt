@@ -12,6 +12,7 @@ from sessionpt.enums import PivotType
 from sessionpt.pivots.calculator import (
     calculate_camarilla_pivots,
     calculate_classic_pivots,
+    calculate_dm_pivots,
     calculate_fibonacci_pivots,
     calculate_traditional_pivots,
     calculate_woodie_pivots,
@@ -34,6 +35,7 @@ PIVOT_CALCULATORS = {
     PivotType.WOODIE: calculate_woodie_pivots,
     PivotType.CLASSIC: calculate_classic_pivots,
 }
+ALL_CONFLUENCE_PIVOT_TYPES = (*PIVOT_CALCULATORS, PivotType.DM)
 
 
 @dataclass(frozen=True)
@@ -55,19 +57,26 @@ def calculate_all_pivot_types(
     low: float,
     close: float,
     pivot_types: Iterable[PivotType | str] | None = None,
+    open_price: float | None = None,
 ) -> dict[str, dict[str, float]]:
     """Calculate pivot levels for each requested pivot type."""
 
     selected = (
-        list(PIVOT_CALCULATORS)
+        list(ALL_CONFLUENCE_PIVOT_TYPES)
         if pivot_types is None
         else [_normalise_pivot_type(pivot_type) for pivot_type in pivot_types]
     )
-    return {
-        pivot_type.value: PIVOT_CALCULATORS[pivot_type](high, low, close)
-        for pivot_type in selected
-        if pivot_type in PIVOT_CALCULATORS
-    }
+    calculated: dict[str, dict[str, float]] = {}
+    for pivot_type in selected:
+        if pivot_type == PivotType.DM:
+            calculated[pivot_type.value] = calculate_dm_pivots(
+                high, low, close, open_price=open_price
+            )
+        elif pivot_type in PIVOT_CALCULATORS:
+            calculated[pivot_type.value] = PIVOT_CALCULATORS[pivot_type](high, low, close)
+        else:
+            raise ValueError(f"Unsupported pivot type: {pivot_type}")
+    return calculated
 
 
 def find_confluence_levels(
@@ -95,7 +104,7 @@ def find_confluence_levels(
 
         cluster = [(pivot_type, level_name, price)]
         used.add(index)
-        tolerance = price * (tolerance_pct / 100)
+        tolerance = abs(price) * (tolerance_pct / 100)
 
         for candidate_index, candidate in enumerate(all_levels):
             if candidate_index in used:
@@ -131,7 +140,7 @@ def calculate_pivot_confluence(
     """Calculate daily support/resistance confluence diagnostics."""
 
     selected = (
-        list(PIVOT_CALCULATORS)
+        list(ALL_CONFLUENCE_PIVOT_TYPES)
         if pivot_types is None
         else [_normalise_pivot_type(pivot_type) for pivot_type in pivot_types]
     )
@@ -151,6 +160,7 @@ def calculate_pivot_confluence(
             low=float(row["Low"]),
             close=close,
             pivot_types=selected,
+            open_price=float(row["Open"]),
         )
         zones = [
             zone
@@ -197,12 +207,13 @@ def get_confluence_at_level(
     target_price: float,
     pivot_types: Iterable[PivotType | str] | None = None,
     tolerance_pct: float = DEFAULT_ZONE_TOLERANCE_PCT,
+    open_price: float | None = None,
 ) -> tuple[int, list[str]]:
     """Return count and labels of pivot levels aligned with target price."""
 
-    tolerance = target_price * (tolerance_pct / 100)
+    tolerance = abs(target_price) * (tolerance_pct / 100)
     aligned: list[str] = []
-    all_pivots = calculate_all_pivot_types(high, low, close, pivot_types)
+    all_pivots = calculate_all_pivot_types(high, low, close, pivot_types, open_price=open_price)
     for pivot_type, levels in all_pivots.items():
         for level_name, price in levels.items():
             if abs(float(price) - target_price) <= tolerance:

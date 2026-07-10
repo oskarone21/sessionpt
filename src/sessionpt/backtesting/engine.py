@@ -32,7 +32,7 @@ from sessionpt.backtesting.specs import (
     InstrumentSpec,
     TrailingStopPolicy,
 )
-from sessionpt.constants import CLOSE_COLUMN, HIGH_COLUMN, LOW_COLUMN
+from sessionpt.constants import CLOSE_COLUMN, HIGH_COLUMN, LOW_COLUMN, OPEN_COLUMN
 from sessionpt.enums.direction import Direction
 from sessionpt.enums.exit_reason import ExitReason
 from sessionpt.sessions.core import get_session_ids
@@ -74,6 +74,19 @@ def _direction_name(direction: Direction) -> str:
     return "LONG" if direction == Direction.LONG else "SHORT"
 
 
+def _stop_exit_reason(
+    current_sl: float,
+    entry_price: float,
+    trailing_activated: bool,
+    breakeven_activated: bool,
+) -> str:
+    if trailing_activated:
+        return ExitReason.TRAILING_SL.value
+    if breakeven_activated and abs(current_sl - entry_price) < 1e-12:
+        return ExitReason.BREAKEVEN.value
+    return ExitReason.SL.value
+
+
 def summarize_trades(
     trades: Sequence[EngineTradeRecord], total_cost_per_trade: float = 0.0
 ) -> BacktestRunResult:
@@ -112,14 +125,14 @@ def summarize_trades(
     pnls = np.array([t.pnl_dollars for t in trades], dtype=float)
     wins = pnls[pnls > 0]
     losses = pnls[pnls <= 0]
-    equity = np.cumsum(pnls)
+    equity = np.concatenate(([0.0], np.cumsum(pnls)))
     dd = np.maximum.accumulate(equity) - equity
     gross_wins = float(wins.sum()) if len(wins) else 0.0
     gross_losses = float(abs(losses.sum())) if len(losses) else 0.0
 
     if len(pnls) > 1:
         std = pnls.std(ddof=1)
-        sharpe = float((pnls.mean() / std) * np.sqrt(len(pnls))) if std > 0 else 0.0
+        sharpe = float(pnls.mean() / std) if std > 0 else 0.0
     else:
         sharpe = 0.0
 
@@ -135,7 +148,11 @@ def summarize_trades(
         gross_pnl=float(pnls.sum() + len(trades) * total_cost_per_trade),
         total_pnl_net=float(pnls.sum()),
         avg_pnl_per_trade=float(pnls.mean()),
-        profit_factor=float(gross_wins / gross_losses) if gross_losses > 0 else float("inf"),
+        profit_factor=(
+            float(gross_wins / gross_losses)
+            if gross_losses > 0
+            else (float("inf") if gross_wins > 0 else 0.0)
+        ),
         sharpe_ratio=sharpe,
         max_drawdown=float(dd.max()) if len(dd) else 0.0,
         exit_reasons=exit_reasons,
@@ -154,16 +171,17 @@ def precompute_backtest_arrays(df: pd.DataFrame, instrument: InstrumentSpec) -> 
     Parameters
     ----------
     df : pd.DataFrame
-        Price data with 'High', 'Low', 'Close' columns.
+        Price data with 'Open', 'High', 'Low', 'Close' columns.
     instrument : InstrumentSpec
         Instrument specification for timezone and session info.
 
     Returns
     -------
     dict
-        Pre-extracted arrays: highs, lows, closes, timestamps, session_ids, n_bars.
+        Pre-extracted arrays: opens, highs, lows, closes, timestamps, session_ids, n_bars.
     """
     return {
+        "opens": df[OPEN_COLUMN].values.astype(float),
         "highs": df[HIGH_COLUMN].values.astype(float),
         "lows": df[LOW_COLUMN].values.astype(float),
         "closes": df[CLOSE_COLUMN].values.astype(float),
@@ -196,7 +214,7 @@ def run_event_backtest(
     Parameters
     ----------
     df : pd.DataFrame
-        Price data with 'High', 'Low', 'Close' columns and DatetimeIndex.
+        Price data with 'Open', 'High', 'Low', 'Close' columns and DatetimeIndex.
     entry_events : iterable of EntryEvent
         Pre-built entry signals (typically from pivot level crossovers).
     instrument : InstrumentSpec
@@ -216,6 +234,7 @@ def run_event_backtest(
         Aggregated backtest statistics and trade records.
     """
     if precomputed is not None:
+        opens = precomputed["opens"]
         highs = precomputed["highs"]
         lows = precomputed["lows"]
         closes = precomputed["closes"]
@@ -223,6 +242,7 @@ def run_event_backtest(
         session_ids = precomputed["session_ids"]
         n_bars = precomputed["n_bars"]
     else:
+        opens = df[OPEN_COLUMN].values.astype(float)
         highs = df[HIGH_COLUMN].values.astype(float)
         lows = df[LOW_COLUMN].values.astype(float)
         closes = df[CLOSE_COLUMN].values.astype(float)
@@ -234,11 +254,21 @@ def run_event_backtest(
             session_close_hour=instrument.session_close_hour,
         )
 
+    array_lengths = {
+        len(opens),
+        len(highs),
+        len(lows),
+        len(closes),
+        len(timestamps),
+        len(session_ids),
+        int(n_bars),
+    }
+    if len(array_lengths) != 1:
+        raise ValueError("Precomputed backtest arrays must have equal lengths")
+
     tick_size = float(instrument.tick_size)
     tick_value = float(instrument.tick_value)
-    total_cost = (
-        float(instrument.commission_round_trip) + float(instrument.slippage_ticks) * tick_value
-    )
+    total_cost = instrument.total_cost_per_trade
 
     trailing = normalize_trailing(trailing_policy)
     breakeven = normalize_breakeven(breakeven_policy)
@@ -249,14 +279,11 @@ def run_event_backtest(
     last_exit_idx = -1
     session_trade_counts: dict[int, int] = {}
     used_levels_by_session: dict[int, set] = {}
-    max_scan_bars = (
-        1440 if execution_policy.close_at_eod else 1440 * execution_policy.max_days_to_hold
-    )
 
     for e in events:
         idx = int(e.entry_idx)
         if idx < 0 or idx >= n_bars:
-            continue
+            raise ValueError(f"entry_idx is outside the dataframe: {idx}")
         if not execution_policy.allow_concurrent_positions and idx <= last_exit_idx:
             continue
 
@@ -274,11 +301,19 @@ def run_event_backtest(
             continue
 
         direction = e.direction
+        if direction not in (Direction.LONG, Direction.SHORT):
+            raise ValueError(f"Unsupported direction: {direction}")
         is_long = direction == Direction.LONG
         entry_price = float(e.entry_price)
         current_sl = float(e.stop_price)
         initial_sl = float(e.stop_price)
         tp_price = float(e.take_profit_price)
+        if not np.isfinite([entry_price, current_sl, tp_price]).all():
+            raise ValueError("Entry, stop, and take-profit prices must be finite")
+        if is_long and not current_sl < entry_price < tp_price:
+            raise ValueError("Long trades require stop < entry < take profit")
+        if not is_long and not tp_price < entry_price < current_sl:
+            raise ValueError("Short trades require take profit < entry < stop")
 
         trailing_activated = False
         breakeven_activated = False
@@ -286,19 +321,65 @@ def run_event_backtest(
         max_adverse = 0.0
         exit_idx = idx
         exit_price = entry_price
-        exit_reason = (
-            ExitReason.MAX_HOLD.value if not execution_policy.close_at_eod else ExitReason.EOD.value
+        exit_reason = ExitReason.DATA_END.value
+        max_hold_deadline = (
+            pd.Timestamp(timestamps[idx]) + pd.Timedelta(days=execution_policy.max_days_to_hold)
+            if not execution_policy.close_at_eod
+            else None
         )
 
-        for j in range(idx + 1, min(idx + max_scan_bars, n_bars)):
+        for j in range(idx + 1, n_bars):
             if execution_policy.close_at_eod and session_ids[j] != session_id:
                 exit_idx = j - 1
                 exit_price = float(closes[exit_idx])
                 exit_reason = ExitReason.EOD.value
                 break
+            if max_hold_deadline is not None and pd.Timestamp(timestamps[j]) >= max_hold_deadline:
+                exit_idx = j
+                exit_price = float(opens[j])
+                exit_reason = ExitReason.MAX_HOLD.value
+                break
 
+            bar_open = float(opens[j])
             bar_high = float(highs[j])
             bar_low = float(lows[j])
+            if not np.isfinite([bar_open, bar_high, bar_low]).all():
+                raise ValueError(f"Non-finite OHLC value at bar {j}")
+
+            if is_long:
+                if bar_open <= current_sl:
+                    exit_idx = j
+                    exit_price = bar_open
+                    exit_reason = _stop_exit_reason(
+                        current_sl, entry_price, trailing_activated, breakeven_activated
+                    )
+                    max_adverse = max(max_adverse, (entry_price - exit_price) / tick_size)
+                    break
+                if bar_open >= tp_price:
+                    exit_idx = j
+                    exit_price = tp_price
+                    exit_reason = ExitReason.TP.value
+                    max_favorable = max(max_favorable, (tp_price - entry_price) / tick_size)
+                    break
+                tp_hit = bar_high >= tp_price
+                sl_hit = bar_low <= current_sl
+            else:
+                if bar_open >= current_sl:
+                    exit_idx = j
+                    exit_price = bar_open
+                    exit_reason = _stop_exit_reason(
+                        current_sl, entry_price, trailing_activated, breakeven_activated
+                    )
+                    max_adverse = max(max_adverse, (exit_price - entry_price) / tick_size)
+                    break
+                if bar_open <= tp_price:
+                    exit_idx = j
+                    exit_price = tp_price
+                    exit_reason = ExitReason.TP.value
+                    max_favorable = max(max_favorable, (entry_price - tp_price) / tick_size)
+                    break
+                tp_hit = bar_low <= tp_price
+                sl_hit = bar_high >= current_sl
 
             if is_long:
                 favorable = (bar_high - entry_price) / tick_size
@@ -307,9 +388,26 @@ def run_event_backtest(
                 favorable = (entry_price - bar_low) / tick_size
                 adverse = (bar_high - entry_price) / tick_size
 
+            if sl_hit:
+                exit_idx = j
+                exit_price = float(current_sl)
+                exit_reason = _stop_exit_reason(
+                    current_sl, entry_price, trailing_activated, breakeven_activated
+                )
+                max_adverse = max(max_adverse, abs(entry_price - exit_price) / tick_size)
+                break
+            if tp_hit:
+                exit_idx = j
+                exit_price = float(tp_price)
+                exit_reason = ExitReason.TP.value
+                max_favorable = max(max_favorable, abs(tp_price - entry_price) / tick_size)
+                break
+
             max_favorable = max(max_favorable, favorable)
             max_adverse = max(max_adverse, adverse)
 
+            # Dynamic stop changes become active for the next bar.  OHLC data
+            # cannot establish whether the favorable or adverse extreme came first.
             if (
                 trailing.enabled
                 and not trailing_activated
@@ -346,45 +444,10 @@ def run_event_backtest(
                         if bar_low <= be_trigger_price:
                             current_sl = min(current_sl, entry_price)
                             breakeven_activated = True
-
-            if is_long:
-                tp_hit = bar_high >= tp_price
-                sl_hit = bar_low <= current_sl
-            else:
-                tp_hit = bar_low <= tp_price
-                sl_hit = bar_high >= current_sl
-
-            if tp_hit and sl_hit:
-                exit_idx = j
-                exit_price = float(current_sl)
-                if trailing_activated:
-                    exit_reason = ExitReason.TRAILING_SL.value
-                elif breakeven_activated and abs(current_sl - entry_price) < 1e-12:
-                    exit_reason = ExitReason.BREAKEVEN.value
-                else:
-                    exit_reason = ExitReason.SL.value
-                break
-            if sl_hit:
-                exit_idx = j
-                exit_price = float(current_sl)
-                if trailing_activated:
-                    exit_reason = ExitReason.TRAILING_SL.value
-                elif breakeven_activated and abs(current_sl - entry_price) < 1e-12:
-                    exit_reason = ExitReason.BREAKEVEN.value
-                else:
-                    exit_reason = ExitReason.SL.value
-                break
-            if tp_hit:
-                exit_idx = j
-                exit_price = float(tp_price)
-                exit_reason = ExitReason.TP.value
-                break
         else:
-            exit_idx = min(idx + max_scan_bars - 1, n_bars - 1)
+            exit_idx = n_bars - 1
             exit_price = float(closes[exit_idx])
-            exit_reason = (
-                ExitReason.EOD.value if execution_policy.close_at_eod else ExitReason.MAX_HOLD.value
-            )
+            exit_reason = ExitReason.DATA_END.value
 
         if not execution_policy.allow_concurrent_positions:
             last_exit_idx = exit_idx

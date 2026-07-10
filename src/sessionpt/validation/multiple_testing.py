@@ -28,10 +28,18 @@ class MultipleTestResult:
 
 def _validate_tests(tests: Iterable[tuple[str, float]]) -> list[tuple[str, float]]:
     validated = [(str(name), float(p_value)) for name, p_value in tests]
+    names = [name for name, _ in validated]
+    if len(names) != len(set(names)):
+        raise ValueError("Multiple-testing names must be unique")
     for name, p_value in validated:
         if not isfinite(p_value) or p_value < 0.0 or p_value > 1.0:
             raise ValueError(f"Invalid p-value for {name}: {p_value}")
     return validated
+
+
+def _validate_alpha(alpha: float) -> None:
+    if not isfinite(alpha) or not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be finite and between 0 and 1")
 
 
 def holm_bonferroni(
@@ -40,6 +48,7 @@ def holm_bonferroni(
 ) -> tuple[MultipleTestResult, ...]:
     """Apply Holm-Bonferroni family-wise error correction."""
 
+    _validate_alpha(alpha)
     ordered = sorted(_validate_tests(tests), key=lambda item: item[1])
     n_tests = len(ordered)
     adjusted_by_name: dict[str, float] = {}
@@ -70,6 +79,7 @@ def benjamini_hochberg(
 ) -> tuple[MultipleTestResult, ...]:
     """Apply Benjamini-Hochberg false-discovery-rate correction."""
 
+    _validate_alpha(alpha)
     ordered = sorted(_validate_tests(tests), key=lambda item: item[1])
     n_tests = len(ordered)
     adjusted_values: list[float] = [1.0] * n_tests

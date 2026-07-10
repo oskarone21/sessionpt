@@ -114,7 +114,18 @@ class TestCalculatePivotLevels:
         for pt in PivotType:
             result = calculate_pivot_levels(daily_df, pt)
             assert len(result) == len(daily_df) - 1
-            assert "P" in result.columns
+
+    def test_single_session_returns_stable_empty_schema(self):
+        daily = pd.DataFrame(
+            {"Open": [100.0], "High": [110.0], "Low": [90.0], "Close": [105.0]},
+            index=pd.DatetimeIndex(["2024-01-01"]),
+        )
+
+        result = calculate_pivot_levels(daily)
+
+        assert result.empty
+        assert result.columns.tolist() == ["P", "R1", "R2", "R3", "S1", "S2", "S3"]
+        assert result.index.name == "date"
 
 
 class TestDailyOHLC:
@@ -186,3 +197,29 @@ class TestPrepareDataWithPivots:
         result = prepare_data_with_pivots(intraday_df, PivotType.TRADITIONAL)
         assert "Open" in result.columns
         assert "Close" in result.columns
+
+    def test_spring_dst_does_not_assign_future_pivots(self):
+        idx = pd.DatetimeIndex(
+            [
+                pd.Timestamp("2024-03-08 16:00", tz="America/New_York"),
+                pd.Timestamp("2024-03-10 18:00", tz="America/New_York"),
+                pd.Timestamp("2024-03-11 10:00", tz="America/New_York"),
+                pd.Timestamp("2024-03-11 18:00", tz="America/New_York"),
+                pd.Timestamp("2024-03-12 10:00", tz="America/New_York"),
+            ]
+        )
+        df = pd.DataFrame(
+            {
+                "Open": [50.0, 20.0, 100.0, 30.0, 200.0],
+                "High": [51.0, 21.0, 101.0, 31.0, 201.0],
+                "Low": [49.0, 19.0, 99.0, 29.0, 199.0],
+                "Close": [50.0, 20.0, 100.0, 30.0, 200.0],
+                "Volume": [1.0] * 5,
+            },
+            index=idx,
+        )
+
+        result = prepare_data_with_pivots(df, PivotType.TRADITIONAL)
+
+        assert result.loc[idx[1], "P"] == pytest.approx(50.0)
+        assert result.loc[idx[2], "P"] == pytest.approx(50.0)
